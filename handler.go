@@ -25,11 +25,12 @@ import (
 )
 
 // NewAPIHandler returns new handler that can serve Docker API subset needed to create buildpack/builder images.
-func NewAPIHandler(workDir, regUname, regPwd string) http.Handler {
+func NewAPIHandler(workDir, arch, regUname, regPwd string) http.Handler {
 	h := handler{
 		workDir:  workDir,
 		regUname: regUname,
 		regPwd:   regPwd,
+		arch:     arch,
 	}
 	r := mux.NewRouter()
 
@@ -46,13 +47,14 @@ type handler struct {
 	workDir  string
 	regUname string
 	regPwd   string
+	arch     string
 }
 
 func (h handler) info(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	info := types.Info{
-		OSType:       "linux", // TODO make this configurable
-		Architecture: "amd64",
+		OSType:       "linux",
+		Architecture: h.arch,
 	}
 	e := json.NewEncoder(w)
 	_ = e.Encode(&info)
@@ -272,16 +274,25 @@ func (h handler) getImage(imgName string) (v1.Image, error) {
 		return tarball.ImageFromPath(tarPath, nil)
 	}
 
-	a := &authn.Basic{
-		Username: h.regUname,
-		Password: h.regPwd,
+	var opts []remote.Option
+
+	if h.regUname != "" {
+		a := &authn.Basic{
+			Username: h.regUname,
+			Password: h.regPwd,
+		}
+		opts = append(opts, remote.WithAuth(a))
 	}
+	opts = append(opts, remote.WithPlatform(v1.Platform{
+		Architecture: h.arch,
+		OS:           "linux",
+	}))
 
 	ref, err = name.ParseReference(imgName)
 	if err != nil {
 		return nil, err
 	}
-	return remote.Image(ref, remote.WithAuth(a))
+	return remote.Image(ref, opts...)
 }
 
 func (h handler) getTag(tag string) (imgRef string, ok bool, err error) {

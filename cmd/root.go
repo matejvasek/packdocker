@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -20,11 +21,12 @@ func NewRootCmd() *cobra.Command {
 	var outDir string
 	var uname string
 	var pwd string
+	var arch string
 
 	cmd := &cobra.Command{
 		Long: `Runs subset of Docker API needed for building buildpack/builder images.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			err := serve(cmd.Context(), socket, outDir, uname, pwd)
+			err := serve(cmd.Context(), socket, outDir, arch, uname, pwd)
 			if strings.Contains(err.Error(), "Server closed") {
 				return nil
 			}
@@ -36,13 +38,14 @@ func NewRootCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&outDir, "out", "o", "", "Path well output image tarballs will be stored.")
 	_ = cmd.MarkFlagRequired("socket")
 	_ = cmd.MarkFlagRequired("out")
+	cmd.Flags().StringVarP(&arch, "arch", "a", runtime.GOARCH, "Architecture to build for.")
 	cmd.Flags().StringVarP(&uname, "user", "u", "", "Registry username.")
 	cmd.Flags().StringVarP(&pwd, "password", "p", "", "Registry password.")
 
 	return cmd
 }
 
-func serve(ctx context.Context, socket, outDir, regUname, regPwd string) error {
+func serve(ctx context.Context, socket, outDir, arch, regUname, regPwd string) error {
 	var err error
 
 	fi, err := os.Stat(socket)
@@ -60,7 +63,7 @@ func serve(ctx context.Context, socket, outDir, regUname, regPwd string) error {
 	defer os.Remove(socket)
 
 	server := http.Server{
-		Handler: packdocker.NewAPIHandler(outDir, regUname, regPwd),
+		Handler: packdocker.NewAPIHandler(outDir, arch, regUname, regPwd),
 	}
 
 	go func() {
