@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -43,7 +43,6 @@ func NewAPIHandler(workDir, regUname, regPwd string) http.Handler {
 }
 
 type handler struct {
-	m        sync.Mutex
 	workDir  string
 	regUname string
 	regPwd   string
@@ -117,21 +116,9 @@ func (h *handler) imageTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tags map[string]string
-	var err error
-	func() {
-		h.m.Lock()
-		defer h.m.Unlock()
-
-		tags, err = h.loadTags()
-		if err != nil {
-			return
-		}
-		tags[repo[0]+":"+tag[0]] = imgName
-		err = h.storeTags(tags)
-	}()
+	err := h.addTag(repo[0]+":"+tag[0], imgName)
 	if err != nil {
-		responseError(err, w)
+		responseError(fmt.Errorf("cannot add tag: %w", err), w)
 		return
 	}
 
@@ -275,21 +262,9 @@ func (h *handler) getImage(imgName string) (v1.Image, error) {
 		return tarball.ImageFromPath(tarPath, nil)
 	}
 
-	var sha string
-	var ok bool
-	var tags map[string]string
-	func() {
-		h.m.Lock()
-		defer h.m.Unlock()
-		tags, err = h.loadTags()
-		if err != nil {
-			return
-		}
-		sha, ok = tags[imgName]
-		return
-	}()
+	sha, ok, err := h.getTag(imgName)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot load tag: %w", err)
 	}
 
 	if ok {
@@ -309,31 +284,70 @@ func (h *handler) getImage(imgName string) (v1.Image, error) {
 	return remote.Image(ref, remote.WithAuth(a))
 }
 
-func (h *handler) loadTags() (map[string]string, error) {
+func (h *handler) getTag(tag string) (imgRef string, ok bool, err error) {
 
-	tags := make(map[string]string)
 	f, err := os.Open(filepath.Join(h.workDir, "tags.json"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return tags, nil
+			return "", false, nil
 		}
-		return tags, err
+		return "", false, err
 	}
 	defer f.Close()
 
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH)
+	if err != nil {
+		return "", false, err
+	}
+
+	tags := make(map[string]string)
 	d := json.NewDecoder(f)
 	err = d.Decode(&tags)
+	if err != nil {
+		return "", false, err
+	}
 
-	return tags, err
+	imgRef, ok = tags[tag]
+	return imgRef, ok, nil
 }
 
-func (h *handler) storeTags(tags map[string]string) error {
+func (h handler) addTag(tag, imgRef string) error {
 	f, err := os.OpenFile(filepath.Join(h.workDir, "tags.json"), os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	if err != nil {
+		return err
+	}
+
+	tags := make(map[string]string)
+
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if fi.Size() != 0 {
+		d := json.NewDecoder(f)
+		err = d.Decode(&tags)
+		if err != nil {
+			return err
+		}
+	}
+
+	_, err = f.Seek(0, io.SeekStart)
+	if err != nil {
+		return err
+	}
+
+	err = f.Truncate(0)
+	if err != nil {
+		return err
+	}
+
+	tags[tag] = imgRef
 	e := json.NewEncoder(f)
 	return e.Encode(&tags)
 }
