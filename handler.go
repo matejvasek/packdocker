@@ -48,7 +48,7 @@ type handler struct {
 	regPwd   string
 }
 
-func (h *handler) info(w http.ResponseWriter, _ *http.Request) {
+func (h handler) info(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	info := types.Info{
 		OSType:       "linux", // TODO make this configurable
@@ -58,14 +58,14 @@ func (h *handler) info(w http.ResponseWriter, _ *http.Request) {
 	_ = e.Encode(&info)
 }
 
-func (h *handler) ping(w http.ResponseWriter, _ *http.Request) {
+func (h handler) ping(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = fmt.Fprint(w, "OK")
 }
 
 var emptyObject = []byte{'{', '}'}
 
-func (h *handler) imageLoad(w http.ResponseWriter, r *http.Request) {
+func (h handler) imageLoad(w http.ResponseWriter, r *http.Request) {
 
 	randBytes := make([]byte, 4)
 	rand.Read(randBytes)
@@ -103,7 +103,7 @@ func (h *handler) imageLoad(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(emptyObject)
 }
 
-func (h *handler) imageTag(w http.ResponseWriter, r *http.Request) {
+func (h handler) imageTag(w http.ResponseWriter, r *http.Request) {
 
 	pathVars := mux.Vars(r)
 	imgName := pathVars["name"]
@@ -125,7 +125,7 @@ func (h *handler) imageTag(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (h *handler) imageSave(w http.ResponseWriter, r *http.Request) {
+func (h handler) imageSave(w http.ResponseWriter, r *http.Request) {
 
 	imageNames := r.URL.Query()["names"]
 	if len(imageNames) != 1 {
@@ -149,7 +149,7 @@ func (h *handler) imageSave(w http.ResponseWriter, r *http.Request) {
 	_ = tarball.Write(ref, img, w)
 }
 
-func (h *handler) imageInspect(w http.ResponseWriter, r *http.Request) {
+func (h handler) imageInspect(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		img v1.Image
@@ -251,7 +251,7 @@ func responseError(err error, w http.ResponseWriter) {
 	e.Encode(&msg)
 }
 
-func (h *handler) getImage(imgName string) (v1.Image, error) {
+func (h handler) getImage(imgName string) (v1.Image, error) {
 	var (
 		ref name.Reference
 		err error
@@ -284,7 +284,7 @@ func (h *handler) getImage(imgName string) (v1.Image, error) {
 	return remote.Image(ref, remote.WithAuth(a))
 }
 
-func (h *handler) getTag(tag string) (imgRef string, ok bool, err error) {
+func (h handler) getTag(tag string) (imgRef string, ok bool, err error) {
 
 	f, err := os.Open(filepath.Join(h.workDir, "tags.json"))
 	if err != nil {
