@@ -44,6 +44,12 @@ func NewAPIHandler(workDir, arch, regUname, regPwd string) http.Handler {
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/get", http.HandlerFunc(h.imageSave)).Methods("GET")
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/load", http.HandlerFunc(h.imageLoad)).Methods("POST")
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/create", http.HandlerFunc(h.imageCreate)).Methods("POST")
+
+	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/{.*}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		w.Write([]byte(`{"message":"endpoint not implemented by packdocker"}`))
+	}))
+
 	return r
 }
 
