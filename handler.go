@@ -1,6 +1,7 @@
 package packdocker
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,9 +17,11 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/gorilla/mux"
@@ -40,6 +43,7 @@ func NewAPIHandler(workDir, arch, regUname, regPwd string) http.Handler {
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/{name:.*}/json", http.HandlerFunc(h.imageInspect)).Methods("GET")
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/get", http.HandlerFunc(h.imageSave)).Methods("GET")
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/load", http.HandlerFunc(h.imageLoad)).Methods("POST")
+	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/create", http.HandlerFunc(h.imageCreate)).Methods("POST")
 	return r
 }
 
@@ -152,7 +156,6 @@ func (h handler) imageSave(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) imageInspect(w http.ResponseWriter, r *http.Request) {
-
 	var (
 		img v1.Image
 		err error
@@ -186,7 +189,7 @@ func (h handler) imageInspect(w http.ResponseWriter, r *http.Request) {
 
 	imageInspect := types.ImageInspect{
 		ID:              mf.Config.Digest.String(),
-		RepoTags:        nil,
+		RepoTags:        []string{imgName},
 		RepoDigests:     nil,
 		Parent:          "",
 		Comment:         "",
@@ -243,7 +246,12 @@ func (h handler) imageInspect(w http.ResponseWriter, r *http.Request) {
 }
 
 func responseError(err error, w http.ResponseWriter) {
-	w.WriteHeader(http.StatusInternalServerError)
+	switch {
+	case errdefs.IsNotFound(err) || os.IsNotExist(err):
+		w.WriteHeader(http.StatusNotFound)
+	default:
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 	msg := struct {
 		Message string
 	}{
@@ -253,11 +261,18 @@ func responseError(err error, w http.ResponseWriter) {
 	e.Encode(&msg)
 }
 
+type imageNotFound struct {
+	img string
+}
+
+func (i imageNotFound) Error() string {
+	return fmt.Sprintf("image not found: %s", i.img)
+}
+
+func (i imageNotFound) NotFound() {}
+
 func (h handler) getImage(imgName string) (v1.Image, error) {
-	var (
-		ref name.Reference
-		err error
-	)
+	var err error
 
 	tarPath := filepath.Join(h.workDir, fmt.Sprintf("sha256:%s.tar", strings.TrimPrefix(imgName, "sha256:")))
 	if _, err = os.Stat(tarPath); err == nil {
@@ -270,29 +285,11 @@ func (h handler) getImage(imgName string) (v1.Image, error) {
 	}
 
 	if ok {
-		tarPath := filepath.Join(h.workDir, fmt.Sprintf("%s.tar", sha))
+		tarPath = filepath.Join(h.workDir, fmt.Sprintf("%s.tar", sha))
 		return tarball.ImageFromPath(tarPath, nil)
 	}
 
-	var opts []remote.Option
-
-	if h.regUname != "" {
-		a := &authn.Basic{
-			Username: h.regUname,
-			Password: h.regPwd,
-		}
-		opts = append(opts, remote.WithAuth(a))
-	}
-	opts = append(opts, remote.WithPlatform(v1.Platform{
-		Architecture: h.arch,
-		OS:           "linux",
-	}))
-
-	ref, err = name.ParseReference(imgName)
-	if err != nil {
-		return nil, err
-	}
-	return remote.Image(ref, opts...)
+	return nil, imageNotFound{img: imgName}
 }
 
 func (h handler) getTag(tag string) (imgRef string, ok bool, err error) {
@@ -361,4 +358,119 @@ func (h handler) addTag(tag, imgRef string) error {
 	tags[tag] = imgRef
 	e := json.NewEncoder(f)
 	return e.Encode(&tags)
+}
+
+func (h handler) imageCreate(w http.ResponseWriter, r *http.Request) {
+	fromImages := r.URL.Query()["fromImage"]
+	tags := r.URL.Query()["tag"]
+
+	if len(fromImages) != 1 || len(tags) != 1 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"Message": "exactly one fromImage and tag is supported" }`))
+		return
+	}
+	fromImage := fromImages[0]
+	tag := tags[0]
+
+	var ref name.Reference
+	var err error
+
+	if strings.HasPrefix(tag, "sha256:") {
+		ref, err = name.NewDigest(fromImage + "@" + tag)
+	} else {
+		ref, err = name.NewTag(fromImage + ":" + tag)
+	}
+	if err != nil {
+		responseError(err, w)
+		return
+	}
+
+	var opts []remote.Option
+
+	a := &authn.Basic{
+		Username: h.regUname,
+		Password: h.regPwd,
+	}
+
+	dec := json.NewDecoder(base64.NewDecoder(base64.StdEncoding,
+		strings.NewReader(r.Header.Get("X-Registry-Auth"))))
+	err = dec.Decode(&a)
+	if err != nil {
+		responseError(err, w)
+		return
+	}
+
+	if a.Username != "" {
+		opts = append(opts, remote.WithAuth(a))
+	}
+
+	opts = append(opts, remote.WithPlatform(v1.Platform{
+		Architecture: h.arch,
+		OS:           "linux",
+	}))
+
+	img, err := remote.Image(ref, opts...)
+	if err != nil {
+		responseError(err, w)
+		return
+	}
+
+	mf, err := img.Manifest()
+	if err != nil {
+		responseError(err, w)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+
+	digest := mf.Config.Digest
+	tarPath := filepath.Join(h.workDir, fmt.Sprintf("%s.tar", digest))
+
+	updates := make(chan v1.Update)
+	writeErr := make(chan error)
+
+	go func() {
+		e := tarball.WriteToFile(tarPath, ref, img, tarball.WithProgress(updates))
+		close(updates)
+		writeErr <- e
+	}()
+
+	enc := json.NewEncoder(w)
+	respondError := func(err error) {
+		_ = enc.Encode(&jsonmessage.JSONMessage{
+			Status: "Error",
+			Error: &jsonmessage.JSONError{
+				Code:    500,
+				Message: "Error: " + err.Error(),
+			},
+		})
+	}
+	for u := range updates {
+		if errors.Is(u.Error, io.EOF) {
+			break
+		}
+		if u.Error != nil {
+			respondError(u.Error)
+			continue
+		}
+		_ = enc.Encode(&jsonmessage.JSONMessage{
+			ID: "Pulling",
+			Progress: &jsonmessage.JSONProgress{
+				Current: u.Complete,
+				Total:   u.Total,
+			},
+		})
+	}
+	err = <-writeErr
+	if err != nil {
+		respondError(err)
+		return
+	}
+	_ = enc.Encode(&jsonmessage.JSONMessage{Status: fmt.Sprintf("Digest: %s", digest)})
+
+	err = h.addTag(ref.String(), mf.Config.Digest.String())
+	if err != nil {
+		respondError(err)
+		return
+	}
 }
