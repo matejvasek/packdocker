@@ -17,7 +17,6 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -25,6 +24,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/gorilla/mux"
+	"github.com/sirupsen/logrus"
 )
 
 // NewAPIHandler returns new handler that can serve Docker API subset needed to create buildpack/builder images.
@@ -46,11 +46,12 @@ func NewAPIHandler(workDir, arch, regUname, regPwd string) http.Handler {
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/create", http.HandlerFunc(h.imageCreate)).Methods("POST")
 
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/{.*}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logrus.Warn("unimplemented endpoint has been invoked")
 		w.WriteHeader(http.StatusNotImplemented)
 		w.Write([]byte(`{"message":"endpoint not implemented by packdocker"}`))
 	}))
 
-	return r
+	return logQueriesMiddleware(r)
 }
 
 type handler struct {
@@ -78,36 +79,37 @@ func (h handler) ping(w http.ResponseWriter, _ *http.Request) {
 var emptyObject = []byte{'{', '}'}
 
 func (h handler) imageLoad(w http.ResponseWriter, r *http.Request) {
+	respondError := errorResponder(w)
 
 	randBytes := make([]byte, 4)
 	rand.Read(randBytes)
 
 	f, err := os.OpenFile(filepath.Join(h.workDir, hex.EncodeToString(randBytes)+"-img.tar"), os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
 	_, err = io.Copy(f, r.Body)
 	if err != nil && !errors.Is(err, io.EOF) {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 	img, err := tarball.ImageFromPath(f.Name(), nil)
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 	mf, err := img.Manifest()
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
 	tarPath := fmt.Sprintf("%s.tar", mf.Config.Digest)
 	err = os.Rename(f.Name(), filepath.Join(h.workDir, tarPath))
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
@@ -116,6 +118,7 @@ func (h handler) imageLoad(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) imageTag(w http.ResponseWriter, r *http.Request) {
+	respondError := errorResponder(w)
 
 	pathVars := mux.Vars(r)
 	imgName := pathVars["name"]
@@ -123,14 +126,13 @@ func (h handler) imageTag(w http.ResponseWriter, r *http.Request) {
 	tag := r.URL.Query()["tag"]
 
 	if len(repo) != 1 || len(tag) != 1 {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"Message": "exactly one repo and tag is supported" }`))
+		respondError(errors.New("exactly one repo and tag is supported"))
 		return
 	}
 
 	err := h.addTag(repo[0]+":"+tag[0], imgName)
 	if err != nil {
-		responseError(fmt.Errorf("cannot add tag: %w", err), w)
+		respondError(fmt.Errorf("cannot add tag: %w", err))
 		return
 	}
 
@@ -138,30 +140,35 @@ func (h handler) imageTag(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h handler) imageSave(w http.ResponseWriter, r *http.Request) {
+	respondError := errorResponder(w)
 
 	imageNames := r.URL.Query()["names"]
 	if len(imageNames) != 1 {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"Message": "exactly one image is supported" }`))
+		respondError(errors.New("exactly one image is supported"))
 		return
 	}
 
 	img, err := h.getImage(imageNames[0])
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
 	ref, err := name.ParseReference(imageNames[0])
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
-	_ = tarball.Write(ref, img, w)
+	err = tarball.Write(ref, img, w)
+	if err != nil {
+		logrus.Error(err)
+	}
 }
 
 func (h handler) imageInspect(w http.ResponseWriter, r *http.Request) {
+	respondError := errorResponder(w)
+
 	var (
 		img v1.Image
 		err error
@@ -172,19 +179,19 @@ func (h handler) imageInspect(w http.ResponseWriter, r *http.Request) {
 
 	img, err = h.getImage(imgName)
 	if err != nil {
-		responseError(err, w)
+		respondError(fmt.Errorf("cannot inspect image: %w", err))
 		return
 	}
 
 	mf, err := img.Manifest()
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
 	cf, err := img.ConfigFile()
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
@@ -248,23 +255,31 @@ func (h handler) imageInspect(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	e := json.NewEncoder(w)
-	_ = e.Encode(imageInspect)
+	err = e.Encode(imageInspect)
+	if err != nil {
+		logrus.Error(err)
+	}
 }
 
-func responseError(err error, w http.ResponseWriter) {
-	switch {
-	case errdefs.IsNotFound(err) || os.IsNotExist(err):
-		w.WriteHeader(http.StatusNotFound)
-	default:
-		w.WriteHeader(http.StatusInternalServerError)
-	}
-	msg := struct {
-		Message string
-	}{
-		Message: err.Error(),
-	}
+func errorResponder(w http.ResponseWriter) func(err error) {
 	e := json.NewEncoder(w)
-	e.Encode(&msg)
+	return func(err error) {
+		var infe imageNotFound
+		switch {
+		case errors.As(err, &infe):
+			logrus.Warn(err)
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			logrus.Error(err)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		msg := struct {
+			Message string
+		}{
+			Message: err.Error(),
+		}
+		_ = e.Encode(&msg)
+	}
 }
 
 type imageNotFound struct {
@@ -274,8 +289,6 @@ type imageNotFound struct {
 func (i imageNotFound) Error() string {
 	return fmt.Sprintf("image not found: %s", i.img)
 }
-
-func (i imageNotFound) NotFound() {}
 
 func (h handler) getImage(imgName string) (v1.Image, error) {
 	var err error
@@ -292,7 +305,9 @@ func (h handler) getImage(imgName string) (v1.Image, error) {
 
 	if ok {
 		tarPath = filepath.Join(h.workDir, fmt.Sprintf("%s.tar", sha))
-		return tarball.ImageFromPath(tarPath, nil)
+		if _, err = os.Stat(tarPath); err == nil {
+			return tarball.ImageFromPath(tarPath, nil)
+		}
 	}
 
 	return nil, imageNotFound{img: imgName}
@@ -367,6 +382,7 @@ func (h handler) addTag(tag, imgRef string) error {
 }
 
 func (h handler) imageCreate(w http.ResponseWriter, r *http.Request) {
+	respondError := errorResponder(w)
 	fromImages := r.URL.Query()["fromImage"]
 	tags := r.URL.Query()["tag"]
 
@@ -387,7 +403,7 @@ func (h handler) imageCreate(w http.ResponseWriter, r *http.Request) {
 		ref, err = name.NewTag(fromImage + ":" + tag)
 	}
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
@@ -402,7 +418,7 @@ func (h handler) imageCreate(w http.ResponseWriter, r *http.Request) {
 		strings.NewReader(r.Header.Get("X-Registry-Auth"))))
 	err = dec.Decode(&a)
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
@@ -417,23 +433,23 @@ func (h handler) imageCreate(w http.ResponseWriter, r *http.Request) {
 
 	img, err := remote.Image(ref, opts...)
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
 
 	mf, err := img.Manifest()
 	if err != nil {
-		responseError(err, w)
+		respondError(err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
 
 	digest := mf.Config.Digest
 	tarPath := filepath.Join(h.workDir, fmt.Sprintf("%s.tar", digest))
 
 	updates := make(chan v1.Update)
 	writeErr := make(chan error)
+
+	w.WriteHeader(http.StatusOK)
 
 	go func() {
 		e := tarball.WriteToFile(tarPath, ref, img, tarball.WithProgress(updates))
@@ -442,7 +458,10 @@ func (h handler) imageCreate(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	enc := json.NewEncoder(w)
-	respondError := func(err error) {
+
+	// We already sent 200, so now we are propagating error now via JSON objects in body.
+	respondError = func(err error) {
+		logrus.Error(err)
 		_ = enc.Encode(&jsonmessage.JSONMessage{
 			Status: "Error",
 			Error: &jsonmessage.JSONError{
@@ -451,6 +470,7 @@ func (h handler) imageCreate(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
+
 	for u := range updates {
 		if errors.Is(u.Error, io.EOF) {
 			break
@@ -479,4 +499,11 @@ func (h handler) imageCreate(w http.ResponseWriter, r *http.Request) {
 		respondError(err)
 		return
 	}
+}
+
+func logQueriesMiddleware(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		logrus.Debugf("request: %s %s\n", request.Method, request.URL)
+		h.ServeHTTP(writer, request)
+	})
 }

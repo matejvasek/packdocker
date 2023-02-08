@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
 	"github.com/matejvasek/packdocker"
@@ -22,10 +23,14 @@ func NewRootCmd() *cobra.Command {
 	var uname string
 	var pwd string
 	var arch string
+	var verbose bool
 
 	cmd := &cobra.Command{
 		Long: `Runs subset of Docker API needed for building buildpack/builder images.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if verbose {
+				logrus.SetLevel(logrus.TraceLevel)
+			}
 			err := serve(cmd.Context(), socket, outDir, arch, uname, pwd)
 			if strings.Contains(err.Error(), "Server closed") {
 				return nil
@@ -41,6 +46,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&arch, "arch", "a", runtime.GOARCH, "Architecture to build for.")
 	cmd.Flags().StringVarP(&uname, "user", "u", "", "Registry username.")
 	cmd.Flags().StringVarP(&pwd, "password", "p", "", "Registry password.")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output.")
 
 	return cmd
 }
