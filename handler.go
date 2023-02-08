@@ -106,7 +106,7 @@ func (h handler) imageLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tarPath := fmt.Sprintf("%s.tar", mf.Config.Digest)
+	tarPath := fmt.Sprintf("%s.tar", strings.TrimPrefix(mf.Config.Digest.String(), "sha256:"))
 	err = os.Rename(f.Name(), filepath.Join(h.workDir, tarPath))
 	if err != nil {
 		respondError(err)
@@ -293,7 +293,7 @@ func (i imageNotFound) Error() string {
 func (h handler) getImage(imgName string) (v1.Image, error) {
 	var err error
 
-	tarPath := filepath.Join(h.workDir, fmt.Sprintf("sha256:%s.tar", strings.TrimPrefix(imgName, "sha256:")))
+	tarPath := filepath.Join(h.workDir, fmt.Sprintf("%s.tar", strings.TrimPrefix(imgName, "sha256:")))
 	if _, err = os.Stat(tarPath); err == nil {
 		return tarball.ImageFromPath(tarPath, nil)
 	}
@@ -304,7 +304,7 @@ func (h handler) getImage(imgName string) (v1.Image, error) {
 	}
 
 	if ok {
-		tarPath = filepath.Join(h.workDir, fmt.Sprintf("%s.tar", sha))
+		tarPath = filepath.Join(h.workDir, fmt.Sprintf("%s.tar", strings.TrimPrefix(sha, "sha256:")))
 		if _, err = os.Stat(tarPath); err == nil {
 			return tarball.ImageFromPath(tarPath, nil)
 		}
@@ -444,7 +444,8 @@ func (h handler) imageCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	digest := mf.Config.Digest
-	tarPath := filepath.Join(h.workDir, fmt.Sprintf("%s.tar", digest))
+
+	tarPath := filepath.Join(h.workDir, fmt.Sprintf("%s.tar", strings.TrimPrefix(digest.String(), "sha256:")))
 
 	updates := make(chan v1.Update)
 	writeErr := make(chan error)
