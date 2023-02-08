@@ -45,11 +45,11 @@ func NewAPIHandler(workDir, arch, regUname, regPwd string) http.Handler {
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/load", http.HandlerFunc(h.imageLoad)).Methods("POST")
 	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/images/create", http.HandlerFunc(h.imageCreate)).Methods("POST")
 
-	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/{.*}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	r.Handle("/v{version:[0-9][0-9A-Za-z.-]*}/{any:.*}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logrus.Warn("unimplemented endpoint has been invoked")
 		w.WriteHeader(http.StatusNotImplemented)
 		w.Write([]byte(`{"message":"endpoint not implemented by packdocker"}`))
-	}))
+	})).Methods("POST", "GET", "PUT", "HEAD")
 
 	return logQueriesMiddleware(r)
 }
