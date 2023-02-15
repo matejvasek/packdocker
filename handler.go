@@ -313,7 +313,7 @@ func (h handler) getImage(imgName string) (v1.Image, error) {
 	return nil, imageNotFound{img: imgName}
 }
 
-func (h handler) getTag(tag string) (imgRef string, ok bool, err error) {
+func (h handler) getTag(tag string) (imgID string, ok bool, err error) {
 
 	f, err := os.Open(filepath.Join(h.workDir, "tags.json"))
 	if err != nil {
@@ -336,8 +336,26 @@ func (h handler) getTag(tag string) (imgRef string, ok bool, err error) {
 		return "", false, err
 	}
 
-	imgRef, ok = tags[tag]
-	return imgRef, ok, nil
+	imgID, ok = tags[tag]
+	if ok {
+		return imgID, true, nil
+	}
+
+	if strings.HasPrefix(tag, "docker.io/") {
+		imgID, ok = tags[strings.TrimPrefix(tag, "docker.io/")]
+		if ok {
+			return imgID, true, nil
+		}
+	}
+
+	if strings.HasPrefix(tag, "index.docker.io/") {
+		imgID, ok = tags[strings.TrimPrefix(tag, "index.docker.io/")]
+		if ok {
+			return imgID, true, nil
+		}
+	}
+
+	return "", false, nil
 }
 
 func (h handler) addTag(tag, imgRef string) error {
